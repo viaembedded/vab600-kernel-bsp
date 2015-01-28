@@ -1,0 +1,60 @@
+v0.06
+
+  - Fix the issue of kernel crash when no LCD transmitter connected.
+
+v0.05
+
+  - Fix the touch screen not working issue due to wrong patch added.
+
+v0.04
+
+  - Fix the vt1636 abnormal graphic issue when LVDS is dual-channel.
+  - Add the patch to solve vt1603 touch wrong position issue.
+
+v0.03
+
+  - Add dual channel LVDS display and USB touch screen support
+  - Accept the new display parameters formats, and ensure the all supporting panels display correctly
+  - Revise PWM0 frequency value to solve screen flicker situation
+  - Support configuration of PWM0 GPIO output without frequency control
+  - Change the sequence of CH7305 transmitter initialization
+  - Join CH7305 PLL reset when the panel is powered on
+
+v0.02
+
+  - Add updated graphic drivers from Shanghai, which supports HDMI, LVDS and TTL panel with new U-Boot setting formats.
+     -- Fix the LVDS panel and the TTL panel show blank screen after Suspend-Resume
+     -- Correct fail displayed resolution 1680x1050
+     -- "vpp_i2c_xfer" error messages appear after Suspend-Resume
+     -- Recify the situation If switch the monitor resolution different from the settings of U-Boot, 
+	the screen blurred after Suspend-Resume
+     -- Fix the part of the screen blurred when booting from kernel to file system
+
+  - Revise touchscreen driver to support Linux X Window
+
+v0.01
+
+v0.01 is based on WM8950_Linux_BSP_1.00.02_121212.
+
+Comprise following alterations.
+
+  - Add graphic drivers from Shanghai
+
+  - Replace vt1603.c with Android v0.96 version
+
+  - Cancel wakelock options
+
+  - Select WAN drivers
+           Remote control drivers
+           UART driver
+
+  - Add WMT watch dog drivers
+        Console frame buffer drivers
+        3G module drivers
+
+  - Modify wmt_battery.c
+           ge_accel.c
+
+  - Confirm NAND Flash drivers corrections
+             YAFFS2 drivers
+             Time.c driver
