@@ -1,3 +1,9 @@
+v0.07
+
+  - Support VAB-600-RS485
+  - Support 3G module - Quectel UC20
+  - Fix USB Hub storage disk too slow issue (benchmark test) at initial boot.
+
 v0.06
 
   - Fix the issue of kernel crash when no LCD transmitter connected.
@@ -45,16 +51,16 @@ Comprise following alterations.
   - Cancel wakelock options
 
   - Select WAN drivers
-           Remote control drivers
-           UART driver
+	Remote control drivers
+	UART driver
 
   - Add WMT watch dog drivers
-        Console frame buffer drivers
-        3G module drivers
+	Console frame buffer drivers
+	3G module drivers
 
   - Modify wmt_battery.c
-           ge_accel.c
+	ge_accel.c
 
   - Confirm NAND Flash drivers corrections
-             YAFFS2 drivers
-             Time.c driver
+	YAFFS2 drivers
+	Time.c driver

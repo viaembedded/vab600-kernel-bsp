@@ -79,6 +79,11 @@
 #include <asm/smp.h>
 #endif
 
+/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2014.10.06 */
+#ifdef CONFIG_VAB600A_USB_HUB_GPIO25_RESET
+extern void VAB600A_usbhub_gpio25_enable(void);
+#endif	// CONFIG_VAB600A_USB_HUB_GPIO25_RESET
+
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
@@ -756,6 +761,11 @@ static noinline int init_post(void)
 		printk(KERN_WARNING "Failed to execute %s\n",
 				ramdisk_execute_command);
 	}
+
+/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2014.10.06 */
+#ifdef CONFIG_VAB600A_USB_HUB_GPIO25_RESET
+	VAB600A_usbhub_gpio25_enable();
+#endif	// CONFIG_VAB600A_USB_HUB_GPIO25_RESET
 
 	/*
 	 * We try each of these until one succeeds.

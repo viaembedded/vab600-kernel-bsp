@@ -61,9 +61,9 @@ static unsigned int enter_wfi_flag = 0;
 
 extern void wmt_power_up_debounce_value(void);
 
-/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2013.4.2 */
+/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2014.10.06 */
 #ifdef CONFIG_VAB600A_USB_HUB_GPIO25_RESET
-extern void VAB600A_usbhub_gpio25_reset(void);
+extern void VAB600A_usbhub_gpio25_disable(void);
 #endif	// CONFIG_VAB600A_USB_HUB_GPIO25_RESET
 
 static void wmt_power_off(void)
@@ -537,10 +537,10 @@ static int __init wmt_init(void)
 #endif
 /* Add End */
 
-/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2013.4.2 */
+/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2014.10.06 */
 #ifdef CONFIG_VAB600A_USB_HUB_GPIO25_RESET
 	printk("[VAB-600-A] Enable USB HUB hardware reset function (GPIO25)\n");
-	VAB600A_usbhub_gpio25_reset();
+	VAB600A_usbhub_gpio25_disable();
 #endif	// CONFIG_VAB600A_USB_HUB_GPIO25_RESET
 
 	return platform_add_devices(wmt_devices, ARRAY_SIZE(wmt_devices));

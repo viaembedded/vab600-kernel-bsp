@@ -1069,7 +1069,6 @@ int ge_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 	}
 
 	if (num_skip_frames) {
-		/* Annotate this line to solve the Suspend-Resume error of no frame buffer console, Max CA. Chen, VIA Embedded, 2013.4.16 */		
 		//lock_screen(info);
 		num_skip_frames--;
 	} else {

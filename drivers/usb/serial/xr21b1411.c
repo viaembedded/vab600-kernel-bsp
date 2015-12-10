@@ -1,24 +1,14 @@
 /*
- * vizzini.c
+ * xr21b1411.c
  *
- * Copyright (c) 2011 Exar Corporation, Inc.
+ * Copyright (c) 2012 Exar Corporation, Inc.
  *
  * ChangeLog:
- *            v0.76- Support for 3.0.0 (Ubuntu 11.10) (Removed all Kernel source
-                     compiler conditions and now the base is Kernel 3.0. Ravi Reddy)
- *            v0.75- Support for 2.6.38.8 (Ubuntu 11.04) - Added 
-		     .usb_driver = &vizzini_driver.
- *            v0.74- Support for 2.6.35.22 (Ubuntu 10.10) - Added 
-		     #include <linux/slab.h> to fix kmalloc/kfree error.
- *            v0.73- Fixed VZIOC_SET_REG (by Ravi Reddy).
- *            v0.72- Support for 2.6.32.21 (by Ravi Reddy, for Ubuntu 10.04).
- *            v0.71- Support for 2.6.31.
- *            v0.5 - Tentative support for compiling with the CentOS 5.1
- *                   kernel (2.6.18-53).
- *            v0.4 - First version.  Lots of stuff lifted from
- *                   cdc-acm.c (credits due to Armin Fuerst, Pavel Machek,
- *                   Johannes Erdfelt, Vojtech Pavlik, David Kubicek) and
- *                   and sierra.c (credit due to Kevin Lloyd).
+ * 
+ *            v0.4- Support for Kernel 3.0 and above (Ubuntu 11.10) 
+ *		    (Removed all Kernel source compiler conditions 
+ *     		    and now the base is Kernel 3.0)
+ *            v0.1
  */
 
 /*
@@ -37,21 +27,12 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
-/* This version of the Linux driver source contains a number of
-   abominable conditional compilation sections to manage the API
-   changes between kernel versions 2.6.18, 2.6.25, and the latest
-   (currently 2.6.27).  At some point we'll hand a version of this
-   driver off to the mainline Linux source tree, and we'll strip all
-   these sections out.  For now it makes it much easier to keep it all
-   in sync while the driver is being developed. */
-
-
-#define DRIVER_VERSION "v.0.76"
+#define DRIVER_VERSION "v.0.4"
 #define DRIVER_AUTHOR "Rob Duncan <rob.duncan@exar.com>"
-#define DRIVER_DESC "USB Driver for Vizzini USB serial port"
-
-#undef VIZZINI_IWA
-
+/* 
+ * post v0.1 modifications are by Ravi Reddy
+ */
+#define DRIVER_DESC "USB Driver for xr21b1411 USB serial port"
 
 #include <linux/kernel.h>
 #include <linux/jiffies.h>
@@ -85,14 +66,17 @@
 
 #include "linux/version.h"
 
-#include "vizzini.h"
-
 
 #define N_IN_URB    4
 #define N_OUT_URB   4
 #define IN_BUFLEN   4096
 
 static int debug;
+
+#define DEBUG_CONFIG    (debug > 0)
+#define DEBUG_BULK      (debug > 1)
+#define DEBUG_DATA      (debug > 2)
+
 
 
 /* -------------------------------------------------------------------------- */
@@ -131,25 +115,24 @@ static inline int usb_endpoint_is_bulk_out(const struct usb_endpoint_descriptor 
 
 /* -------------------------------------------------------------------------- */
 
-#include "vzioctl.h"
+#include "xr21b1411ioctl.h"
+#include "xr21b1411.h"
 
 /* -------------------------------------------------------------------------- */
 
 static struct usb_device_id id_table [] = {
-        { USB_DEVICE(0x04e2, 0x1410) },
-        { USB_DEVICE(0x04e2, 0x1412) },
-        { USB_DEVICE(0x04e2, 0x1414) },
+        { USB_DEVICE(0x04e2, 0x1411) },
         { }
 };
 MODULE_DEVICE_TABLE(usb, id_table);
 
 
-static void vizzini_disconnect(struct usb_interface *interface);
+static void xr21b1411_disconnect(struct usb_interface *interface);
 
-static struct usb_driver vizzini_driver = {
-        .name          = "vizzini",
+static struct usb_driver xr21b1411_driver = {
+        .name          = "xr21b1411",
         .probe         = usb_serial_probe,
-        .disconnect    = vizzini_disconnect,
+        .disconnect    = xr21b1411_disconnect,
         .id_table      = id_table,
         .no_dynamic_id = 1,
 };
@@ -157,47 +140,37 @@ static struct usb_driver vizzini_driver = {
 
 /* -------------------------------------------------------------------------- */
 
-struct vizzini_serial_private
+struct xr21b1411_serial_private
 {
         struct usb_interface *data_interface;
 };
 
 
-struct vizzini_port_private {
-        spinlock_t    lock;     /* lock the structure */
-        int           outstanding_urbs; /* number of out urbs in flight */
+struct xr21b1411_port_private {
+        spinlock_t                  lock; /* lock the structure */
+        int                         outstanding_urbs; /* number of out urbs in flight */
 
-        struct urb   *in_urbs[N_IN_URB];
-        char         *in_buffer[N_IN_URB];
+        struct urb                 *in_urbs[N_IN_URB];
+        char                       *in_buffer[N_IN_URB];
 
-        int           ctrlin;
-        int           ctrlout;
-        int           clocal;
+        int                         ctrlin;
+        int                         ctrlout;
+        int                         clocal;
 
-        int           block;
-        int           preciseflags; /* USB: wide mode, TTY: flags per character */
-        int           trans9;   /* USB: wide mode, serial 9N1 */
-        unsigned int  baud_base; /* setserial: used to hack in non-standard baud rates */
-        int           have_extra_byte;
-        int           extra_byte;
+        struct usb_cdc_line_coding  line_coding;
 
-	int           bcd_device;
+        int                         preciseflags; /* USB: wide mode, TTY: flags per character */
+        int                         trans9; /* USB: wide mode, serial 9N1 */
+        int                         match; /* address match mode */
 
-#ifdef VIZZINI_IWA
-        int           iwa;
-#endif
+        int                         bcd_device;
 };
 
 
 /* -------------------------------------------------------------------------- */
 
-static int vizzini_rev_a(struct usb_serial_port *port)
-{
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
-	return portdata->bcd_device == 0;
-}
-
-
+#define XR_SET_REG              0
+#define XR_GETN_REG             1
 
 
 /* -------------------------------------------------------------------------- */
@@ -215,7 +188,7 @@ static int acm_ctrl_msg(struct usb_serial_port *port,
                                      buf,
                                      len,
                                      5000);
-        if (debug) dev_dbg(&port->dev, "acm_control_msg: rq: 0x%02x val: %#x len: %#x result: %d\n", request, value, len, retval);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "acm_control_msg: rq: 0x%02x val: %#x len: %#x result: %d\n", request, value, len, retval);
         return retval < 0 ? retval : 0;
 }
 
@@ -229,8 +202,8 @@ static int acm_ctrl_msg(struct usb_serial_port *port,
 
 
 
-static int vizzini_test_mode(struct usb_serial_port *port,
-                             int selector)
+static int xr21b1411_test_mode(struct usb_serial_port *port,
+                           int selector)
 {
         struct usb_serial *serial = port->serial;
         int retval = usb_control_msg(serial->dev, usb_sndctrlpipe(serial->dev, 0),
@@ -239,26 +212,26 @@ static int vizzini_test_mode(struct usb_serial_port *port,
                                      USB_DEVICE_TEST_MODE,
                                      selector << 8,
                                      NULL, 0, 5000);
-        if (debug) dev_dbg(&port->dev, "vz_test_mode: selector=0x%02x\n", selector);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "xr21b1411_test_mode: selector=0x%02x\n", selector);
         return retval < 0 ? retval : 0;
 }
 
 
-static int vizzini_set_reg(struct usb_serial_port *port,
-                           int block, int regnum, int value)
+static int xr21b1411_set_reg(struct usb_serial_port *port,
+                         int address, int value)
 {
         struct usb_serial *serial = port->serial;
         int result;
 
 
-        if (debug) dev_dbg(&port->dev, "%s 0x%02x:0x%02x = 0x%02x\n", __func__, block, regnum, value);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s 0x%02x = 0x%02x\n", __func__, address, value);
 
         result = usb_control_msg(serial->dev,                     /* usb device */
                                  usb_sndctrlpipe(serial->dev, 0), /* endpoint pipe */
                                  XR_SET_REG,                      /* request */
                                  USB_DIR_OUT | USB_TYPE_VENDOR,   /* request_type */
                                  value,                           /* request value */
-                                 regnum | (block << 8),           /* index */
+                                 address,                         /* index */
                                  NULL,                            /* data */
                                  0,                               /* size */
                                  5000);                           /* timeout */
@@ -267,8 +240,8 @@ static int vizzini_set_reg(struct usb_serial_port *port,
 }
 
 
-static int vizzini_get_reg(struct usb_serial_port *port,
-                           int block, int reg, char *value)
+static int xr21b1411_get_reg(struct usb_serial_port *port,
+                         int address, u16 *value)
 {
         struct usb_serial *serial = port->serial;
         int result;
@@ -278,171 +251,52 @@ static int vizzini_get_reg(struct usb_serial_port *port,
                                  XR_GETN_REG,                     /* request */
                                  USB_DIR_IN | USB_TYPE_VENDOR,    /* request_type */
                                  0,                               /* request value */
-                                 reg | (block << 8),              /* index */
+                                 address,                         /* index */
                                  value,                           /* data */
-                                 1,                               /* size */
+                                 2,                               /* size */
                                  5000);                           /* timeout */
 
         return result;
 }
 
 
-#if 0
-static int vizzini_getn_reg(struct usb_serial_port *port,
-                            int block, char *data, size_t size)
+static void xr21b1411_disable(struct usb_serial_port *port)
 {
-        struct usb_serial *serial = port->serial;
-        int result;
-
-        result = usb_control_msg(serial->dev,           /* usb device */
-                                 usb_rcvctrlpipe(serial->dev, 0),/* endpoint pipe */
-                                 XR_GETN_REG,           /* request */
-                                 USB_DIR_IN | USB_TYPE_VENDOR,  /* request_type */
-                                 0,             /* request value */
-                                 0 | (block << 8),      /* index */
-                                 data,              /* data */
-                                 size,              /* size */
-                                 5000);             /* timeout */
-
-        return result;
-}
-#endif
-
-
-static void vizzini_disable(struct usb_serial_port *port)
-{
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
-        int block = portdata->block;
-
-        vizzini_set_reg(port, block, UART_ENABLE, 0);
-        vizzini_set_reg(port, URM_REG_BLOCK, URM_ENABLE_BASE + block, 0);
+        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_ENABLE, 0);
 }
 
 
-static void vizzini_enable(struct usb_serial_port *port)
+static void xr21b1411_enable(struct usb_serial_port *port)
 {
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
-        int block = portdata->block;
-
-        vizzini_set_reg(port, URM_REG_BLOCK, URM_ENABLE_BASE + block, URM_ENABLE_0_TX);
-        vizzini_set_reg(port, block, UART_ENABLE, UART_ENABLE_TX | UART_ENABLE_RX);
-        vizzini_set_reg(port, URM_REG_BLOCK, URM_ENABLE_BASE + block, URM_ENABLE_0_TX | URM_ENABLE_0_RX);
+        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_ENABLE, UART_ENABLE_TX | UART_ENABLE_RX);
 }
 
 
-static void vizzini_loopback(struct usb_serial_port *port, int from)
+static void xr21b1411_loopback(struct usb_serial_port *port)
 {
-	struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
-	int block = portdata->block;
-	int lb;
+        dev_info(&port->dev, "Internal loopback\n");
 
-	if (vizzini_rev_a(port)) {
-		switch (from)
-		{
-		case 0: lb = UART_LOOPBACK_CTL_RX_UART3; break;
-		case 1: lb = UART_LOOPBACK_CTL_RX_UART2; break;
-		case 2: lb = UART_LOOPBACK_CTL_RX_UART1; break;
-		case 3: lb = UART_LOOPBACK_CTL_RX_UART0; break;
-		default: return;
-		}
-	} else {
-		switch (from)
-		{
-		case 0: lb = UART_LOOPBACK_CTL_RX_UART0; break;
-		case 1: lb = UART_LOOPBACK_CTL_RX_UART1; break;
-		case 2: lb = UART_LOOPBACK_CTL_RX_UART2; break;
-		case 3: lb = UART_LOOPBACK_CTL_RX_UART3; break;
-		default: return;
-		}
-	}
-	
-	dev_info(&port->dev, "Internal loopback from %d\n", from);
-
-	vizzini_disable(port);
-	vizzini_set_reg(port, block, UART_LOOPBACK_CTL, UART_LOOPBACK_CTL_ENABLE | lb);
-	vizzini_enable(port);
-}
-
-
-struct vizzini_baud_rate
-{
-	unsigned int tx;
-	unsigned int rx0;
-	unsigned int rx1;
-};
-
-static struct vizzini_baud_rate vizzini_baud_rates[] = {
-	{ 0x000, 0x000, 0x000 },
-	{ 0x000, 0x000, 0x000 },
-	{ 0x100, 0x000, 0x100 },
-	{ 0x020, 0x400, 0x020 },
-	{ 0x010, 0x100, 0x010 },
-	{ 0x208, 0x040, 0x208 },
-	{ 0x104, 0x820, 0x108 },
-	{ 0x844, 0x210, 0x884 },
-	{ 0x444, 0x110, 0x444 },
-	{ 0x122, 0x888, 0x224 },
-	{ 0x912, 0x448, 0x924 },
-	{ 0x492, 0x248, 0x492 },
-	{ 0x252, 0x928, 0x292 },
-	{ 0X94A, 0X4A4, 0XA52 },
-	{ 0X52A, 0XAA4, 0X54A },
-	{ 0XAAA, 0x954, 0X4AA },
-	{ 0XAAA, 0x554, 0XAAA },
-	{ 0x555, 0XAD4, 0X5AA },
-	{ 0XB55, 0XAB4, 0X55A },
-	{ 0X6B5, 0X5AC, 0XB56 },
-	{ 0X5B5, 0XD6C, 0X6D6 },
-	{ 0XB6D, 0XB6A, 0XDB6 },
-	{ 0X76D, 0X6DA, 0XBB6 },
-	{ 0XEDD, 0XDDA, 0X76E },
-	{ 0XDDD, 0XBBA, 0XEEE },
-	{ 0X7BB, 0XF7A, 0XDDE },
-	{ 0XF7B, 0XEF6, 0X7DE },
-	{ 0XDF7, 0XBF6, 0XF7E },
-	{ 0X7F7, 0XFEE, 0XEFE },
-	{ 0XFDF, 0XFBE, 0X7FE },
-	{ 0XF7F, 0XEFE, 0XFFE },
-	{ 0XFFF, 0XFFE, 0XFFD },
-};
-
-static int vizzini_set_baud_rate(struct usb_serial_port *port, unsigned int rate)
-{
-	struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
-	int 		block 	= portdata->block;
-	unsigned int 	divisor = 48000000 / rate;
-	unsigned int 	i 	= ((32 * 48000000) / rate) & 0x1f;
-	unsigned int 	tx_mask = vizzini_baud_rates[i].tx;
-	unsigned int 	rx_mask = (divisor & 1) ? vizzini_baud_rates[i].rx1 : vizzini_baud_rates[i].rx0;
-
-	dev_dbg(&port->dev, "Setting baud rate to %d: i=%u div=%u tx=%03x rx=%03x\n", rate, i, divisor, tx_mask, rx_mask);
-
-	vizzini_set_reg(port, block, UART_CLOCK_DIVISOR_0, (divisor >>  0) & 0xff);
-	vizzini_set_reg(port, block, UART_CLOCK_DIVISOR_1, (divisor >>  8) & 0xff);
-	vizzini_set_reg(port, block, UART_CLOCK_DIVISOR_2, (divisor >> 16) & 0xff);
-	vizzini_set_reg(port, block, UART_TX_CLOCK_MASK_0, (tx_mask >>  0) & 0xff);
-	vizzini_set_reg(port, block, UART_TX_CLOCK_MASK_1, (tx_mask >>  8) & 0xff);
-	vizzini_set_reg(port, block, UART_RX_CLOCK_MASK_0, (rx_mask >>  0) & 0xff);
-	vizzini_set_reg(port, block, UART_RX_CLOCK_MASK_1, (rx_mask >>  8) & 0xff);
-	
-	return -EINVAL;
+        xr21b1411_disable(port);
+        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_LOOPBACK, UART_LOOPBACK_TX_RX | UART_LOOPBACK_RTS_CTS);
+        xr21b1411_enable(port);
 }
 
 
 
-static void vizzini_set_termios(struct tty_struct *tty_param,
+static void xr21b1411_set_termios(struct tty_struct *tty_param,
                                 struct usb_serial_port *port,
                                 struct ktermios *old_termios)
 {
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private *portdata = usb_get_serial_port_data(port);
 
-        unsigned int             cflag, block;
-        speed_t                  rate;
-        unsigned int             format_size, format_parity, format_stop, flow, gpio_mode;
-
+        unsigned int             cflag;
+        unsigned int             flow, gpio_mode;
         struct tty_struct       *tty = port->port.tty;
 
-        if (debug) dev_dbg(&port->dev, "%s\n", __func__);
+        unsigned int data_bits, parity_type, char_format;
+        int result;
+
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s\n", __func__);
 
 /*  mutex_lock(&config_mutex); */
 
@@ -450,104 +304,107 @@ static void vizzini_set_termios(struct tty_struct *tty_param,
 
         portdata->clocal = ((cflag & CLOCAL) != 0);
 
-        block = portdata->block;
-
-        vizzini_disable(port);
+        xr21b1411_disable(port);
 
         if ((cflag & CSIZE) == CS7) {
-                format_size = UART_FORMAT_SIZE_7;
+                data_bits = 7;
         } else if ((cflag & CSIZE) == CS5) {
                 /* Enabling 5-bit mode is really 9-bit mode! */
-                format_size = UART_FORMAT_SIZE_9;
+                data_bits = 9;
         } else {
-                format_size = UART_FORMAT_SIZE_8;
+                data_bits = 8;
         }
-        portdata->trans9 = (format_size == UART_FORMAT_SIZE_9);
+        portdata->trans9 = (data_bits == 9);
 
         if (cflag & PARENB) {
                 if (cflag & PARODD) {
                         if (cflag & CMSPAR) {
-                                format_parity = UART_FORMAT_PARITY_1;
+                                parity_type = USB_CDC_MARK_PARITY;
                         } else {
-                                format_parity = UART_FORMAT_PARITY_ODD;
+                                parity_type = USB_CDC_ODD_PARITY;
                         }
                 } else {
                         if (cflag & CMSPAR) {
-                                format_parity = UART_FORMAT_PARITY_0;
+                                parity_type = USB_CDC_SPACE_PARITY;
                         } else {
-                                format_parity = UART_FORMAT_PARITY_EVEN;
+                                parity_type = USB_CDC_EVEN_PARITY;
                         }
                 }
         } else {
-                format_parity = UART_FORMAT_PARITY_NONE;
+                parity_type = USB_CDC_NO_PARITY;
         }
 
         if (cflag & CSTOPB) {
-                format_stop = UART_FORMAT_STOP_2;
+                char_format = USB_CDC_2_STOP_BITS;
         } else {
-                format_stop = UART_FORMAT_STOP_1;
+                char_format = USB_CDC_1_STOP_BITS;
         }
 
-#ifdef VIZZINI_IWA
-        if (format_size == UART_FORMAT_SIZE_8) {
-                portdata->iwa = format_parity;
-                if (portdata->iwa != UART_FORMAT_PARITY_NONE) {
-                        format_size = UART_FORMAT_SIZE_9;
-                        format_parity = UART_FORMAT_PARITY_NONE;
+        if (portdata->match) {
+                /* We're in address-match mode, so assume that the
+                 * flow register and wide-mode are already set
+                 * correctly; don't mess with it. */
+        } else {
+                if (cflag & CRTSCTS) {
+                        flow      = UART_FLOW_MODE_HW;
+                        gpio_mode = UART_GPIO_MODE_SEL_RTS_CTS;
+                } else if (I_IXOFF(tty) || I_IXON(tty)) {
+                        unsigned char   start_char = START_CHAR(tty);
+                        unsigned char   stop_char  = STOP_CHAR(tty);
+                        
+                        flow      = UART_FLOW_MODE_SW;
+                        gpio_mode = UART_GPIO_MODE_SEL_GPIO;
+                        
+                        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_XON_CHAR, start_char);
+                        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_XOFF_CHAR, stop_char);
+                } else {
+                        flow      = UART_FLOW_MODE_NONE;
+                        gpio_mode = UART_GPIO_MODE_SEL_GPIO;
                 }
-        } else {
-                portdata->iwa = UART_FORMAT_PARITY_NONE;
-        }
-#endif
-        vizzini_set_reg(port, block, UART_FORMAT, format_size | format_parity | format_stop);
+                
+                xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_FLOW, flow);
+                xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_GPIO_MODE, gpio_mode);
 
-        if (cflag & CRTSCTS) {
-                flow      = UART_FLOW_MODE_HW;
-                gpio_mode = UART_GPIO_MODE_SEL_RTS_CTS;
-        } else if (I_IXOFF(tty) || I_IXON(tty)) {
-                unsigned char   start_char = START_CHAR(tty);
-                unsigned char   stop_char  = STOP_CHAR(tty);
-
-                flow      = UART_FLOW_MODE_SW;
-                gpio_mode = UART_GPIO_MODE_SEL_GPIO;
-
-                vizzini_set_reg(port, block, UART_XON_CHAR, start_char);
-                vizzini_set_reg(port, block, UART_XOFF_CHAR, stop_char);
-        } else {
-                flow      = UART_FLOW_MODE_NONE;
-                gpio_mode = UART_GPIO_MODE_SEL_GPIO;
+                if (portdata->trans9) {
+                        /* Turn on wide mode if we're 9-bit transparent. */
+                        xr21b1411_set_reg(port, XR21B1411_REG_EPM + EPM_WIDE, EPM_WIDE_EN);
+                } else if (!portdata->preciseflags) {
+                        /* Turn off wide mode unless we have precise flags. */
+                        xr21b1411_set_reg(port, XR21B1411_REG_EPM + EPM_WIDE, 0);
+                }
         }
 
-        vizzini_set_reg(port, block, UART_FLOW, flow);
-        vizzini_set_reg(port, block, UART_GPIO_MODE, gpio_mode);
+        portdata->line_coding.dwDTERate   = cpu_to_le32(tty_get_baud_rate(tty));
+        portdata->line_coding.bCharFormat = char_format;
+        portdata->line_coding.bParityType = parity_type;
+        portdata->line_coding.bDataBits   = data_bits;
 
-        if (portdata->trans9) {
-                /* Turn on wide mode if we're 9-bit transparent. */
-                vizzini_set_reg(port, EPLOCALS_REG_BLOCK, (block * MEM_EP_LOCALS_SIZE) + EP_WIDE_MODE, 1);
-#ifdef VIZZINI_IWA
-        } else if (portdata->iwa != UART_FORMAT_PARITY_NONE) {
-                vizzini_set_reg(port, EPLOCALS_REG_BLOCK, (block * MEM_EP_LOCALS_SIZE) + EP_WIDE_MODE, 1);
-#endif
-        } else if (!portdata->preciseflags) {
-                /* Turn off wide mode unless we have precise flags. */
-                vizzini_set_reg(port, EPLOCALS_REG_BLOCK, (block * MEM_EP_LOCALS_SIZE) + EP_WIDE_MODE, 0);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s: line coding: rate=%d format=%d parity=%d bits=%d\n", __func__,
+                           cpu_to_le32(tty_get_baud_rate(tty)),
+                           char_format,
+                           parity_type,
+                           data_bits);
+        result = acm_set_line(port, &portdata->line_coding);
+        if (result < 0) {
+                //dev_dbg(&port->dev, "%d != %ld\n", result, sizeof(portdata->line_coding));
+                dev_dbg(&port->dev, "%s: cannot set line coding: rate=%d format=%d parity=%d bits=%d\n", __func__,
+                        tty_get_baud_rate(tty),
+                        portdata->line_coding.bCharFormat,
+                        portdata->line_coding.bParityType,
+                        portdata->line_coding.bDataBits);
         }
 
-        rate = tty_get_baud_rate(tty);
-	if(rate)
-		vizzini_set_baud_rate(port, rate);
-
-        vizzini_enable(port);
+        xr21b1411_enable(port);
 
 /*  mutex_unlock(&config_mutex); */
 }
 
 
-static void vizzini_break_ctl(struct tty_struct *tty, int break_state)
+static void xr21b1411_break_ctl(struct tty_struct *tty, int break_state)
 {
         struct usb_serial_port *port = tty->driver_data;
 
-        if (debug) dev_dbg(&port->dev, "BREAK %d\n", break_state);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "BREAK %d\n", break_state);
         if (break_state)
                 acm_send_break(port, 0x10);
         else
@@ -555,13 +412,12 @@ static void vizzini_break_ctl(struct tty_struct *tty, int break_state)
 }
 
 
-
-static int vizzini_tiocmget(struct tty_struct *tty)
+static int xr21b1411_tiocmget(struct tty_struct *tty)
 {
         struct usb_serial_port *port = tty->driver_data;
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private *portdata = usb_get_serial_port_data(port);
 
-/*  if (!VIZZINI_READY(vizzini)) */
+/*  if (!xr21b1411_READY(xr21b1411)) */
 /*      return -EINVAL; */
 
         return (portdata->ctrlout & ACM_CTRL_DTR ? TIOCM_DTR : 0) |
@@ -573,14 +429,13 @@ static int vizzini_tiocmget(struct tty_struct *tty)
 }
 
 
-static int vizzini_tiocmset(struct tty_struct *tty,
-                            unsigned int set, unsigned int clear)
+static int xr21b1411_tiocmset(struct tty_struct *tty, unsigned int set, unsigned int clear)
 {
         struct usb_serial_port *port = tty->driver_data;
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private *portdata = usb_get_serial_port_data(port);
         unsigned int newctrl;
 
-/*  if (!VIZZINI_READY(vizzini)) */
+/*  if (!xr21b1411_READY(xr21b1411)) */
 /*      return -EINVAL; */
 
         newctrl = portdata->ctrlout;
@@ -595,19 +450,19 @@ static int vizzini_tiocmset(struct tty_struct *tty,
 }
 
 
-static int vizzini_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
+static int xr21b1411_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long arg)
 {
         struct usb_serial_port *port = tty->driver_data;
-        struct vizzini_port_private *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private *portdata = usb_get_serial_port_data(port);
 
-        unsigned int             block, reg, val, match, preciseflags, unicast, broadcast, flow, selector;
-        char                    *data;
+        unsigned int             reg, val, match, preciseflags, unicast, broadcast, flow, selector;
+        u16     *rdata;
         int                      result;
         struct serial_struct     ss;
 
-        if (debug) dev_dbg(&port->dev, "%s %08x\n", __func__, cmd);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s %08x\n", __func__, cmd);
 
-/*  if (!VIZZINI_READY(vizzini)) */
+/*  if (!xr21b1411_READY(xr21b1411)) */
 /*      return -EINVAL; */
 
         switch (cmd) {
@@ -615,7 +470,7 @@ static int vizzini_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long
                 if (!arg)
                         return -EFAULT;
                 memset(&ss, 0, sizeof(ss));
-                ss.baud_base = portdata->baud_base;
+                ss.baud_base = le32_to_cpu(portdata->line_coding.dwDTERate);
                 if (copy_to_user((void __user *)arg, &ss, sizeof(ss)))
                         return -EFAULT;
                 break;
@@ -625,94 +480,103 @@ static int vizzini_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long
                         return -EFAULT;
                 if (copy_from_user(&ss, (void __user *)arg, sizeof(ss)))
                         return -EFAULT;
-                portdata->baud_base = ss.baud_base;
-                if (debug) dev_dbg(&port->dev, "baud_base=%d\n", portdata->baud_base);
+                portdata->line_coding.dwDTERate = cpu_to_le32(ss.baud_base);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "baud_base=%d\n", ss.baud_base);
 
 /*      mutex_lock(&config_mutex); */
-                vizzini_disable(port);
-		if(portdata->baud_base)
-			vizzini_set_baud_rate(port, portdata->baud_base);
-                vizzini_enable(port);
+                xr21b1411_disable(port);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s: line coding: rate=%d format=%d parity=%d bits=%d\n", __func__,
+                                   ss.baud_base,
+                                   portdata->line_coding.bCharFormat,
+                                   portdata->line_coding.bParityType,
+                                   portdata->line_coding.bDataBits);
+                result = acm_set_line(port, &portdata->line_coding);
+                if (result < 0) {
+                        //dev_dbg(&port->dev, "%d != %ld\n", result, sizeof(portdata->line_coding));
+                        dev_dbg(&port->dev, "%s: cannot set line coding: rate=%d format=%d parity=%d bits=%d\n", __func__,
+                                ss.baud_base,
+                                portdata->line_coding.bCharFormat,
+                                portdata->line_coding.bParityType,
+                                portdata->line_coding.bDataBits);
+                        return -EINVAL;
+                }
+                xr21b1411_enable(port);
 /*      mutex_unlock(&config_mutex); */
                 break;
 
-        case VZIOC_GET_REG:
-                if (get_user(block, (int __user *)arg))
-                        return -EFAULT;
-                if (get_user(reg, (int __user *)(arg + sizeof(int))))
+        case XRUSBIOC_GET_REG:
+                if (get_user(reg, (int __user *)(arg)))
                         return -EFAULT;
 
-                data = kmalloc(1, GFP_KERNEL);
-                if (data == NULL) {
+                rdata = kmalloc(sizeof(u16), GFP_KERNEL);
+                if (rdata == NULL) {
                         dev_err(&port->dev, "%s - Cannot allocate USB buffer.\n", __func__);
                         return -ENOMEM;
                 }
 
-		if (block == -1)
-			block = portdata->block;
-
-                result = vizzini_get_reg(port, block, reg, data);
-                if (result != 1) {
+                result = xr21b1411_get_reg(port, reg, rdata);
+                if (result != 2) {
                         dev_err(&port->dev, "Cannot get register (%d)\n", result);
-                        kfree(data);
+                        kfree(rdata);
                         return -EFAULT;
                 }
 
-                if (put_user(data[0], (int __user *)(arg + 2 * sizeof(int)))) {
+                if (put_user(le16_to_cpu(*rdata), (int __user *)(arg + 1 * sizeof(int)))) {
                         dev_err(&port->dev, "Cannot put user result\n");
-                        kfree(data);
+                        kfree(rdata);
                         return -EFAULT;
                 }
 
-                kfree(data);
+                kfree(rdata);
                 break;
 
-        case VZIOC_SET_REG:
-                if (get_user(block, (int __user *)arg))
+        case XRUSBIOC_SET_REG:
+                if (get_user(reg, (int __user *)(arg)))
                         return -EFAULT;
-                if (get_user(reg, (int __user *)(arg + sizeof(int))))
-                        return -EFAULT;
-                if (get_user(val, (int __user *)(arg + 2 * sizeof(int))))
+                if (get_user(val, (int __user *)(arg + sizeof(int))))
                         return -EFAULT;
 
-		if (block == -1)
-			block = portdata->block;
-
-                result = vizzini_set_reg(port, block, reg, val);
+                result = xr21b1411_set_reg(port, reg, val);
                 if (result < 0)
                         return -EFAULT;
                 break;
 
-        case VZIOC_SET_ADDRESS_MATCH:
+        case XRUSBIOC_SET_ADDRESS_MATCH:
                 match = arg;
 
-                if (debug) dev_dbg(&port->dev, "%s VIOC_SET_ADDRESS_MATCH %d\n", __func__, match);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s VIOC_SET_ADDRESS_MATCH %d\n", __func__, match);
 
-                vizzini_disable(port);
+                xr21b1411_disable(port);
 
-                if (match & VZ_ADDRESS_MATCH_DISABLE) {
-                        flow      = UART_FLOW_MODE_NONE;
+                if (match == XRUSB_ADDRESS_MATCH_DISABLE) {
+                        portdata->match = 0;
+                        flow            = UART_FLOW_MODE_NONE;
+                        if (DEBUG_CONFIG) dev_dbg(&port->dev, "address match: disable flow=%d\n",
+                                                  flow);
+                        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_FLOW, flow);
                 } else {
-                        flow      = UART_FLOW_MODE_ADDR_MATCH_TX;
-                        unicast   = (match >> VZ_ADDRESS_UNICAST_S) & 0xff;
-                        broadcast = (match >> VZ_ADDRESS_BROADCAST_S) & 0xff;
+                        portdata->match = 1;
+                        flow            = UART_FLOW_MODE_ADDR_MATCH;
+                        unicast         = (match >> XRUSB_ADDRESS_UNICAST_S) & 0xff;
+                        broadcast       = (match >> XRUSB_ADDRESS_BROADCAST_S) & 0xff;
+
+                        if (DEBUG_CONFIG) dev_dbg(&port->dev, "address match: enable flow=%d ucast=%d bcast=%u\n",
+                                                  flow, unicast, broadcast);
+                        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_FLOW, flow);
+                        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_XON_CHAR, unicast);
+                        xr21b1411_set_reg(port, XR21B1411_REG_UART + UART_XOFF_CHAR, broadcast);
+                        xr21b1411_set_reg(port, XR21B1411_REG_EPM + EPM_WIDE, EPM_WIDE_EN);
                 }
 
-                if (debug) dev_dbg(&port->dev, "address match: flow=%d ucast=%d bcast=%u\n",
-                                   flow, unicast, broadcast);
-                vizzini_set_reg(port, portdata->block, UART_FLOW, flow);
-                vizzini_set_reg(port, portdata->block, UART_XON_CHAR, unicast);
-                vizzini_set_reg(port, portdata->block, UART_XOFF_CHAR, broadcast);
-
-                vizzini_enable(port);
+                xr21b1411_enable(port);
                 break;
 
-        case VZIOC_SET_PRECISE_FLAGS:
+        case XRUSBIOC_SET_PRECISE_FLAGS:
                 preciseflags = arg;
 
-                if (debug) dev_dbg(&port->dev, "%s VIOC_SET_PRECISE_FLAGS %d\n", __func__, preciseflags);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s VIOC_SET_PRECISE_FLAGS %d\n", __func__, preciseflags);
 
-                vizzini_disable(port);
+                xr21b1411_disable(port);
 
                 if (preciseflags) {
                         portdata->preciseflags = 1;
@@ -720,24 +584,22 @@ static int vizzini_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long
                         portdata->preciseflags = 0;
                 }
 
-                vizzini_set_reg(port, EPLOCALS_REG_BLOCK,
-                                (portdata->block * MEM_EP_LOCALS_SIZE) + EP_WIDE_MODE,
-                                portdata->preciseflags);
+                xr21b1411_set_reg(port, XR21B1411_REG_EPM + EPM_WIDE, portdata->preciseflags);
 
-                vizzini_enable(port);
+                xr21b1411_enable(port);
                 break;
 
-        case VZIOC_TEST_MODE:
+        case XRUSBIOC_TEST_MODE:
                 selector = arg;
-                if (debug) dev_dbg(&port->dev, "%s VIOC_TEST_MODE 0x%02x\n", __func__, selector);
-                vizzini_test_mode(port, selector);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s VIOC_TEST_MODE 0x%02x\n", __func__, selector);
+                xr21b1411_test_mode(port, selector);
                 break;
 
-	case VZIOC_LOOPBACK:
-		selector = arg;
-		dev_dbg(&port->dev, "VIOC_LOOPBACK 0x%02x\n", selector);
-		vizzini_loopback(port, selector);
-		break;
+        case XRUSBIOC_LOOPBACK:
+                selector = arg;
+                dev_dbg(&port->dev, "VIOC_LOOPBACK 0x%02x\n", selector);
+                xr21b1411_loopback(port);
+                break;
 
         default:
                 return -ENOIOCTLCMD;
@@ -750,44 +612,20 @@ static int vizzini_ioctl(struct tty_struct *tty, unsigned int cmd, unsigned long
 /* -------------------------------------------------------------------------- */
 
 
-#ifdef VIZZINI_IWA
-static const int vizzini_parity[] =
-{
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
-        0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0
-};
-#endif
-
-
-
-static void vizzini_out_callback(struct urb *urb)
+static void xr21b1411_out_callback(struct urb *urb)
 {
         struct usb_serial_port          *port     = urb->context;
-        struct vizzini_port_private     *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private       *portdata = usb_get_serial_port_data(port);
         int                              status   = urb->status;
         unsigned long                    flags;
 
-        if (debug) dev_dbg(&port->dev, "%s - port %d\n", __func__, port->number);
+        if (DEBUG_BULK) dev_dbg(&port->dev, "%s - port %d\n", __func__, port->number);
 
         /* free up the transfer buffer, as usb_free_urb() does not do this */
         kfree(urb->transfer_buffer);
 
         if (status)
-                if (debug) dev_dbg(&port->dev, "%s - nonzero write bulk status received: %d\n",
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s - nonzero write bulk status received: %d\n",
                                    __func__, status);
 
         spin_lock_irqsave(&portdata->lock, flags);
@@ -798,20 +636,20 @@ static void vizzini_out_callback(struct urb *urb)
 }
 
 
-static int vizzini_write_room(struct tty_struct *tty)
+static int xr21b1411_write_room(struct tty_struct *tty)
 {
         struct usb_serial_port *port = tty->driver_data;
-        struct vizzini_port_private     *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private       *portdata = usb_get_serial_port_data(port);
         unsigned long                    flags;
 
-        if (debug) dev_dbg(&port->dev, "%s - port %d\n", __func__, port->number);
+        if (DEBUG_BULK) dev_dbg(&port->dev, "%s - port %d\n", __func__, port->number);
 
         /* try to give a good number back based on if we have any free urbs at
          * this point in time */
         spin_lock_irqsave(&portdata->lock, flags);
         if (portdata->outstanding_urbs > N_OUT_URB * 2 / 3) {
                 spin_unlock_irqrestore(&portdata->lock, flags);
-                if (debug) dev_dbg(&port->dev, "%s - write limit hit\n", __func__);
+                if (DEBUG_BULK) dev_dbg(&port->dev, "%s - write limit hit\n", __func__);
                 return 0;
         }
         spin_unlock_irqrestore(&portdata->lock, flags);
@@ -820,12 +658,12 @@ static int vizzini_write_room(struct tty_struct *tty)
 }
 
 
-static int vizzini_write(struct tty_struct *tty, struct usb_serial_port *port,
+static int xr21b1411_write(struct tty_struct *tty, struct usb_serial_port *port,
                          const unsigned char *buf, int count)
 {
-        struct vizzini_port_private     *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private       *portdata = usb_get_serial_port_data(port);
         struct usb_serial               *serial   = port->serial;
-        int                              bufsize  = count;
+        int                              bufsize  = portdata->preciseflags ? count * 2 : count;
         unsigned long                    flags;
         unsigned char                   *buffer;
         struct urb                      *urb;
@@ -833,21 +671,17 @@ static int vizzini_write(struct tty_struct *tty, struct usb_serial_port *port,
 
         portdata = usb_get_serial_port_data(port);
 
-        if (debug) dev_dbg(&port->dev, "%s: write (%d chars)\n", __func__, count);
+        if (DEBUG_BULK) dev_dbg(&port->dev, "%s: write (%d chars)\n", __func__, count);
 
         spin_lock_irqsave(&portdata->lock, flags);
         if (portdata->outstanding_urbs > N_OUT_URB) {
                 spin_unlock_irqrestore(&portdata->lock, flags);
-                if (debug) dev_dbg(&port->dev, "%s - write limit hit\n", __func__);
+                if (DEBUG_BULK) dev_dbg(&port->dev, "%s - write limit hit\n", __func__);
                 return 0;
         }
         portdata->outstanding_urbs++;
         spin_unlock_irqrestore(&portdata->lock, flags);
 
-#ifdef VIZZINI_IWA
-        if (portdata->iwa != UART_FORMAT_PARITY_NONE)
-                bufsize = count * 2;
-#endif
         buffer = kmalloc(bufsize, GFP_ATOMIC);
 
         if (!buffer) {
@@ -863,32 +697,23 @@ static int vizzini_write(struct tty_struct *tty, struct usb_serial_port *port,
                 goto error_no_urb;
         }
 
-#ifdef VIZZINI_IWA
-        if (portdata->iwa != UART_FORMAT_PARITY_NONE) {
+        if (portdata->preciseflags) {
+                unsigned char *b = buffer;
                 int i;
-                char *b = buffer;
                 for (i = 0; i < count; ++i) {
-                        int c, p = 0;
-                        c = buf[i];
-                        switch (portdata->iwa) {
-                        case UART_FORMAT_PARITY_ODD:    p = !vizzini_parity[c]; break;
-                        case UART_FORMAT_PARITY_EVEN:   p = vizzini_parity[c];  break;
-                        case UART_FORMAT_PARITY_1:  p = 1;          break;
-                        case UART_FORMAT_PARITY_0:  p = 0;          break;
-                        }
-                        *b++ = c;
-                        *b++ = p;
+                        *b++ = buf[i];
+                        *b++ = 0;
                 }
-        } else
-#endif
+        }
+        else
                 memcpy(buffer, buf, count);
 
-/*         usb_serial_debug_data(debug, &port->dev, __func__, bufsize, buffer); */
+        if (DEBUG_DATA) usb_serial_debug_data(debug, &port->dev, __func__, bufsize, buffer);
 
         usb_fill_bulk_urb(urb, serial->dev,
                           usb_sndbulkpipe(serial->dev,
                                           port->bulk_out_endpointAddress),
-                          buffer, bufsize, vizzini_out_callback, port);
+                          buffer, bufsize, xr21b1411_out_callback, port);
 
         /* send it down the pipe */
         status = usb_submit_urb(urb, GFP_ATOMIC);
@@ -919,47 +744,48 @@ error_no_buffer:
 
 /* -------------------------------------------------------------------------- */
 
-static void vizzini_in_callback(struct urb *urb)
+#define PRECISE_OVERRUN 0x08
+#define PRECISE_FRAME   0x04
+#define PRECISE_BREAK   0x02
+#define PRECISE_PARITY  0x01
+
+
+
+static void xr21b1411_in_callback(struct urb *urb)
 {
         int                              endpoint        = usb_pipeendpoint(urb->pipe);
         struct usb_serial_port          *port            = urb->context;
-        struct vizzini_port_private     *portdata        = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private       *portdata        = usb_get_serial_port_data(port);
         struct tty_struct               *tty             = port->port.tty;
         int                              preciseflags    = portdata->preciseflags;
         char                            *transfer_buffer = urb->transfer_buffer;
-        int                              length, room, have_extra_byte;
+        int                              length, room;
         int                              err;
 
-        if (debug) dev_dbg(&port->dev, "%s: %p\n", __func__, urb);
+        if (DEBUG_BULK) dev_dbg(&port->dev, "%s: %p\n", __func__, urb);
 
         if (urb->status) {
-                if (debug) dev_dbg(&port->dev, "%s: nonzero status: %d on endpoint %02x.\n",
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s: nonzero status: %d on endpoint %02x.\n",
                                    __func__, urb->status, endpoint);
                 return;
         }
 
-#ifdef VIZZINI_IWA
-        if (portdata->iwa != UART_FORMAT_PARITY_NONE) {
-                preciseflags = true;
-        }
-#endif
-
         length = urb->actual_length;
         if (length == 0) {
-                if (debug) dev_dbg(&port->dev, "%s: empty read urb received\n", __func__);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s: empty read urb received\n", __func__);
                 err = usb_submit_urb(urb, GFP_ATOMIC);
                 if (err)
                         dev_err(&port->dev, "resubmit read urb failed. (%d)\n", err);
                 return;
         }
 
-        length      = length + (portdata->have_extra_byte ? 1 : 0);
-        have_extra_byte = (preciseflags && (length & 1));
-        length      = (preciseflags) ? (length / 2) : length;
+        if (DEBUG_DATA) usb_serial_debug_data(debug, &port->dev, __func__, length, transfer_buffer);
+
+        length = (preciseflags) ? (length / 2) : length;
 
         room = tty_buffer_request_room(tty, length);
         if (room != length) {
-                if (debug) dev_dbg(&port->dev, "Not enough room in TTY buf, dropped %d chars.\n", length - room);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "Not enough room in TTY buf, dropped %d chars.\n", length - room);
         }
 
         if (room) {
@@ -970,37 +796,16 @@ static void vizzini_in_callback(struct urb *urb)
                         for (i = 0; i < room; ++i) {
                                 char tty_flag;
 
-                                if (i == 0) {
-                                        if (portdata->have_extra_byte) {
-                                                ch = portdata->extra_byte;
-                                        } else {
-                                                ch = *dp++;
-                                        }
-                                } else {
-                                        ch = *dp++;
-                                }
+                                ch       = *dp++;
                                 ch_flags = *dp++;
 
-#ifdef VIZZINI_IWA
-                                {
-                                        int p;
-                                        switch (portdata->iwa) {
-                                        case UART_FORMAT_PARITY_ODD:    p = !vizzini_parity[ch]; break;
-                                        case UART_FORMAT_PARITY_EVEN:   p = vizzini_parity[ch];  break;
-                                        case UART_FORMAT_PARITY_1:  p = 1;           break;
-                                        case UART_FORMAT_PARITY_0:  p = 0;           break;
-                                        default:                        p = 0;           break;
-                                        }
-                                        ch_flags ^= p;
-                                }
-#endif
-                                if (ch_flags & RAMCTL_BUFFER_PARITY)
+                                if (!portdata->trans9 && (ch_flags & PRECISE_PARITY))
                                         tty_flag = TTY_PARITY;
-                                else if (ch_flags & RAMCTL_BUFFER_BREAK)
+                                else if (ch_flags & PRECISE_BREAK)
                                         tty_flag = TTY_BREAK;
-                                else if (ch_flags & RAMCTL_BUFFER_FRAME)
+                                else if (ch_flags & PRECISE_FRAME)
                                         tty_flag = TTY_FRAME;
-                                else if (ch_flags & RAMCTL_BUFFER_OVERRUN)
+                                else if (ch_flags & PRECISE_OVERRUN)
                                         tty_flag = TTY_OVERRUN;
                                 else
                                         tty_flag = TTY_NORMAL;
@@ -1014,11 +819,6 @@ static void vizzini_in_callback(struct urb *urb)
                 tty_flip_buffer_push(tty);
         }
 
-        portdata->have_extra_byte = have_extra_byte;
-        if (have_extra_byte) {
-                portdata->extra_byte = transfer_buffer[urb->actual_length - 1];
-        }
-
         err = usb_submit_urb(urb, GFP_ATOMIC);
         if (err)
                 dev_err(&port->dev, "resubmit read urb failed. (%d)\n", err);
@@ -1026,10 +826,11 @@ static void vizzini_in_callback(struct urb *urb)
 
 
 /* -------------------------------------------------------------------------- */
-static void vizzini_int_callback(struct urb *urb)
+
+static void xr21b1411_int_callback(struct urb *urb)
 {
         struct usb_serial_port          *port     = urb->context;
-        struct vizzini_port_private     *portdata = usb_get_serial_port_data(port);
+        struct xr21b1411_port_private     *portdata = usb_get_serial_port_data(port);
         struct tty_struct               *tty      = port->port.tty;
 
         struct usb_cdc_notification     *dr       = urb->transfer_buffer;
@@ -1045,34 +846,34 @@ static void vizzini_int_callback(struct urb *urb)
         case -ENOENT:
         case -ESHUTDOWN:
                 /* this urb is terminated, clean up */
-                if (debug) dev_dbg(&port->dev, "urb shutting down with status: %d\n", urb->status);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "urb shutting down with status: %d\n", urb->status);
                 return;
         default:
-                if (debug) dev_dbg(&port->dev, "nonzero urb status received: %d\n", urb->status);
+                if (DEBUG_BULK) dev_dbg(&port->dev, "nonzero urb status received: %d\n", urb->status);
                 goto exit;
         }
 
-/*  if (!VIZZINI_READY(vizzini)) */
+/*  if (!xr21b1411_READY(xr21b1411)) */
 /*      goto exit; */
 
         data = (unsigned char *)(dr + 1);
         switch (dr->bNotificationType) {
 
         case USB_CDC_NOTIFY_NETWORK_CONNECTION:
-                if (debug) dev_dbg(&port->dev, "%s network\n", dr->wValue ? "connected to" : "disconnected from");
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s network\n", dr->wValue ? "connected to" : "disconnected from");
                 break;
 
         case USB_CDC_NOTIFY_SERIAL_STATE:
                 newctrl = le16_to_cpu(get_unaligned((__le16 *)data));
 
                 if (!portdata->clocal && (portdata->ctrlin & ~newctrl & ACM_CTRL_DCD)) {
-                        if (debug) dev_dbg(&port->dev, "calling hangup\n");
+                        if (DEBUG_CONFIG) dev_dbg(&port->dev, "calling hangup\n");
                         tty_hangup(tty);
                 }
 
                 portdata->ctrlin = newctrl;
 
-                if (debug) dev_dbg(&port->dev, "input control lines: dcd%c dsr%c break%c ring%c framing%c parity%c overrun%c\n",
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "input control lines: dcd%c dsr%c break%c ring%c framing%c parity%c overrun%c\n",
                                    portdata->ctrlin & ACM_CTRL_DCD ? '+' : '-',
                                    portdata->ctrlin & ACM_CTRL_DSR ? '+' : '-',
                                    portdata->ctrlin & ACM_CTRL_BRK ? '+' : '-',
@@ -1083,13 +884,13 @@ static void vizzini_int_callback(struct urb *urb)
                 break;
 
         default:
-                if (debug) dev_dbg(&port->dev, "unknown notification %d received: index %d len %d data0 %d data1 %d\n",
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "unknown notification %d received: index %d len %d data0 %d data1 %d\n",
                                    dr->bNotificationType, dr->wIndex,
                                    dr->wLength, data[0], data[1]);
                 break;
         }
 exit:
-        if (debug) dev_dbg(&port->dev, "Resubmitting interrupt IN urb %p\n", urb);
+        if (DEBUG_BULK) dev_dbg(&port->dev, "Resubmitting interrupt IN urb %p\n", urb);
         status = usb_submit_urb(urb, GFP_ATOMIC);
         if (status)
                 dev_err(&port->dev, "usb_submit_urb failed with result %d", status);
@@ -1098,30 +899,29 @@ exit:
 
 /* -------------------------------------------------------------------------- */
 
-static int vizzini_open(struct tty_struct *tty_param, struct usb_serial_port *port)
+static int xr21b1411_open(struct tty_struct *tty_param, struct usb_serial_port *port)
 {
-        struct vizzini_port_private     *portdata;
+        struct xr21b1411_port_private       *portdata;
         struct usb_serial               *serial = port->serial;
-        struct tty_struct               *tty    = port->port.tty;
         int                              i;
         struct urb                      *urb;
         int                              result;
 
         portdata = usb_get_serial_port_data(port);
 
-        if (debug) dev_dbg(&port->dev, "%s\n", __func__);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s\n", __func__);
 
         acm_set_control(port, portdata->ctrlout = ACM_CTRL_DTR | ACM_CTRL_RTS);
 
         /* Reset low level data toggle and start reading from endpoints */
         for (i = 0; i < N_IN_URB; i++) {
-                if (debug) dev_dbg(&port->dev, "%s urb %d\n", __func__, i);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s urb %d\n", __func__, i);
 
                 urb = portdata->in_urbs[i];
                 if (!urb)
                         continue;
                 if (urb->dev != serial->dev) {
-                        if (debug) dev_dbg(&port->dev, "%s: dev %p != %p\n", __func__,
+                        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s: dev %p != %p\n", __func__,
                                            urb->dev, serial->dev);
                         continue;
                 }
@@ -1130,18 +930,16 @@ static int vizzini_open(struct tty_struct *tty_param, struct usb_serial_port *po
                  * make sure endpoint data toggle is synchronized with the
                  * device
                  */
-/*      if (debug) dev_dbg(&port->dev, "%s clearing halt on %x\n", __func__, urb->pipe); */
+/*      if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s clearing halt on %x\n", __func__, urb->pipe); */
 /*      usb_clear_halt(urb->dev, urb->pipe); */
 
-                if (debug) dev_dbg(&port->dev, "%s submitting urb %p\n", __func__, urb);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s submitting urb %p\n", __func__, urb);
                 result = usb_submit_urb(urb, GFP_KERNEL);
                 if (result) {
                         dev_err(&port->dev, "submit urb %d failed (%d) %d\n",
                                 i, result, urb->transfer_buffer_length);
                 }
         }
-
-        tty->low_latency = 1;
 
         /* start up the interrupt endpoint if we have one */
         if (port->interrupt_in_urb) {
@@ -1154,14 +952,14 @@ static int vizzini_open(struct tty_struct *tty_param, struct usb_serial_port *po
 }
 
 
-static void vizzini_close(struct usb_serial_port *port)
+static void xr21b1411_close(struct usb_serial_port *port)
 {
         int                              i;
         struct usb_serial               *serial = port->serial;
-        struct vizzini_port_private     *portdata;
+        struct xr21b1411_port_private       *portdata;
         struct tty_struct               *tty    = port->port.tty;
 
-        if (debug) dev_dbg(&port->dev, "%s\n", __func__);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s\n", __func__);
         portdata = usb_get_serial_port_data(port);
 
         acm_set_control(port, portdata->ctrlout = 0);
@@ -1178,9 +976,9 @@ static void vizzini_close(struct usb_serial_port *port)
 }
 
 
-static int vizzini_attach(struct usb_serial *serial)
+static int xr21b1411_attach(struct usb_serial *serial)
 {
-        struct vizzini_serial_private   *serial_priv       = usb_get_serial_data(serial);
+        struct xr21b1411_serial_private     *serial_priv       = usb_get_serial_data(serial);
         struct usb_interface            *interface         = serial_priv->data_interface;
         struct usb_host_interface       *iface_desc;
         struct usb_endpoint_descriptor  *endpoint;
@@ -1188,14 +986,14 @@ static int vizzini_attach(struct usb_serial *serial)
         struct usb_endpoint_descriptor  *bulk_out_endpoint = NULL;
 
         struct usb_serial_port          *port;
-        struct vizzini_port_private     *portdata;
+        struct xr21b1411_port_private       *portdata;
         struct urb                      *urb;
         int                              i, j;
 
         /* Assume that there's exactly one serial port. */
         port = serial->port[0];
 
-        if (debug) dev_dbg(&port->dev, "%s\n", __func__);
+        if (DEBUG_CONFIG) dev_dbg(&port->dev, "%s\n", __func__);
 
         /* The usb_serial is now fully set up, but we want to make a
          * couple of modifications.  Namely, it was configured based
@@ -1220,7 +1018,7 @@ static int vizzini_attach(struct usb_serial *serial)
         }
 
         if (!bulk_out_endpoint || !bulk_in_endpoint) {
-                if (debug) dev_dbg(&port->dev, "Missing endpoint!\n");
+                dev_dbg(&port->dev, "Missing endpoint!\n");
                 return -EINVAL;
         }
 
@@ -1229,8 +1027,8 @@ static int vizzini_attach(struct usb_serial *serial)
 
         portdata = kzalloc(sizeof(*portdata), GFP_KERNEL);
         if (!portdata) {
-                if (debug) dev_dbg(&port->dev, "%s: kmalloc for vizzini_port_private (%d) failed!.\n",
-                                   __func__, i);
+                dev_dbg(&port->dev, "%s: kmalloc for xr21b1411_port_private (%d) failed!.\n",
+                        __func__, i);
                 return -ENOMEM;
         }
         spin_lock_init(&portdata->lock);
@@ -1244,44 +1042,40 @@ static int vizzini_attach(struct usb_serial *serial)
                 }
         }
 
-        /* Bulk OUT endpoints 0x1..0x4 map to register blocks 0..3 */
-        portdata->block = port->bulk_out_endpointAddress - 1;
-
         usb_set_serial_port_data(port, portdata);
 
-	portdata->bcd_device = le16_to_cpu(serial->dev->descriptor.bcdDevice);
-	if (vizzini_rev_a(port))
-		dev_info(&port->dev, "Adapting to revA silicon\n");
+        portdata->bcd_device = le16_to_cpu(serial->dev->descriptor.bcdDevice);
 
         /* initialize the in urbs */
         for (j = 0; j < N_IN_URB; ++j) {
                 urb = usb_alloc_urb(0, GFP_KERNEL);
                 if (urb == NULL) {
-                        if (debug) dev_dbg(&port->dev, "%s: alloc for in port failed.\n",
-                                           __func__);
-                        continue;
+                  dev_dbg(&port->dev, "%s: alloc for in port failed.\n", __func__);
+                  continue;
                 }
                 /* Fill URB using supplied data. */
-                if (debug) dev_dbg(&port->dev, "Filling URB %p, EP=%d buf=%p len=%d\n", urb, port->bulk_in_endpointAddress, portdata->in_buffer[j], IN_BUFLEN);
+                if (DEBUG_CONFIG) dev_dbg(&port->dev, "Filling URB %p, EP=%d buf=%p len=%d\n", urb, port->bulk_in_endpointAddress, portdata->in_buffer[j], IN_BUFLEN);
                 usb_fill_bulk_urb(urb, serial->dev,
                                   usb_rcvbulkpipe(serial->dev,
                                                   port->bulk_in_endpointAddress),
                                   portdata->in_buffer[j], IN_BUFLEN,
-                                  vizzini_in_callback, port);
+                                  xr21b1411_in_callback, port);
                 portdata->in_urbs[j] = urb;
         }
+
+        xr21b1411_set_reg(port, XR21B1411_PRM_RAM + PRM_CUSTOM_DRIVER, PRM_CUSTOM_DRIVER_ACTIVE);
 
         return 0;
 }
 
 
-static void vizzini_serial_disconnect(struct usb_serial *serial)
+static void xr21b1411_serial_disconnect(struct usb_serial *serial)
 {
         struct usb_serial_port          *port;
-        struct vizzini_port_private     *portdata;
+        struct xr21b1411_port_private       *portdata;
         int                              i, j;
 
-        if (debug) dev_dbg(&serial->dev->dev, "%s %p\n", __func__, serial);
+        if (DEBUG_CONFIG) dev_dbg(&serial->dev->dev, "%s %p\n", __func__, serial);
 
         for (i = 0; i < serial->num_ports; ++i) {
                 port = serial->port[i];
@@ -1291,6 +1085,8 @@ static void vizzini_serial_disconnect(struct usb_serial *serial)
                 if (!portdata)
                         continue;
 
+                xr21b1411_set_reg(port, XR21B1411_PRM_RAM + PRM_CUSTOM_DRIVER, 0);
+
                 for (j = 0; j < N_IN_URB; j++) {
                         usb_kill_urb(portdata->in_urbs[j]);
                         usb_free_urb(portdata->in_urbs[j]);
@@ -1299,13 +1095,13 @@ static void vizzini_serial_disconnect(struct usb_serial *serial)
 }
 
 
-static void vizzini_serial_release(struct usb_serial *serial)
+static void xr21b1411_serial_release(struct usb_serial *serial)
 {
         struct usb_serial_port          *port;
-        struct vizzini_port_private     *portdata;
+        struct xr21b1411_port_private       *portdata;
         int                              i, j;
 
-        if (debug) dev_dbg(&serial->dev->dev, "%s %p\n", __func__, serial);
+        if (DEBUG_CONFIG) dev_dbg(&serial->dev->dev, "%s %p\n", __func__, serial);
 
         for (i = 0; i < serial->num_ports; ++i) {
                 port = serial->port[i];
@@ -1324,16 +1120,15 @@ static void vizzini_serial_release(struct usb_serial *serial)
 }
 
 
-
 /* -------------------------------------------------------------------------- */
 
-static int vizzini_calc_num_ports(struct usb_serial *serial)
+static int xr21b1411_calc_num_ports(struct usb_serial *serial)
 {
         return 1;
 }
 
 
-static int vizzini_probe(struct usb_serial *serial,
+static int xr21b1411_probe(struct usb_serial *serial,
                          const struct usb_device_id *id)
 {
         struct usb_interface                    *intf                     = serial->interface;
@@ -1351,7 +1146,7 @@ static int vizzini_probe(struct usb_serial *serial,
         struct usb_endpoint_descriptor          *epctrl;
         struct usb_endpoint_descriptor          *epread;
         struct usb_endpoint_descriptor          *epwrite;
-        struct vizzini_serial_private           *serial_priv;
+        struct xr21b1411_serial_private           *serial_priv;
 
         if (!buffer) {
                 dev_err(&intf->dev, "Weird descriptor references\n");
@@ -1360,7 +1155,7 @@ static int vizzini_probe(struct usb_serial *serial,
 
         if (!buflen) {
                 if (intf->cur_altsetting->endpoint->extralen && intf->cur_altsetting->endpoint->extra) {
-                        if (debug) dev_dbg(&intf->dev, "Seeking extra descriptors on endpoint\n");
+                        if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Seeking extra descriptors on endpoint\n");
                         buflen = intf->cur_altsetting->endpoint->extralen;
                         buffer = intf->cur_altsetting->endpoint->extra;
                 } else {
@@ -1402,7 +1197,7 @@ static int vizzini_probe(struct usb_serial *serial,
                         /* there are LOTS more CDC descriptors that
                          * could legitimately be found here.
                          */
-                        if (debug) dev_dbg(&intf->dev, "Ignoring descriptor: "
+                        if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Ignoring descriptor: "
                                            "type %02x, length %d\n",
                                            buffer[2], buffer[0]);
                         break;
@@ -1414,30 +1209,30 @@ static int vizzini_probe(struct usb_serial *serial,
 
         if (!union_header) {
                 if (call_interface_num > 0) {
-                        if (debug) dev_dbg(&intf->dev, "No union descriptor, using call management descriptor\n");
+                        if (DEBUG_CONFIG) dev_dbg(&intf->dev, "No union descriptor, using call management descriptor\n");
                         data_interface = usb_ifnum_to_if(usb_dev, (data_interface_num = call_interface_num));
                         control_interface = intf;
                 } else {
-                        if (debug) dev_dbg(&intf->dev, "No union descriptor, giving up\n");
+                        if (DEBUG_CONFIG) dev_dbg(&intf->dev, "No union descriptor, giving up\n");
                         return -ENODEV;
                 }
         } else {
                 control_interface = usb_ifnum_to_if(usb_dev, union_header->bMasterInterface0);
                 data_interface    = usb_ifnum_to_if(usb_dev, (data_interface_num = union_header->bSlaveInterface0));
                 if (!control_interface || !data_interface) {
-                        if (debug) dev_dbg(&intf->dev, "no interfaces\n");
+                        if (DEBUG_CONFIG) dev_dbg(&intf->dev, "no interfaces\n");
                         return -ENODEV;
                 }
         }
 
         if (data_interface_num != call_interface_num)
-                if (debug) dev_dbg(&intf->dev, "Separate call control interface. That is not fully supported.\n");
+                if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Separate call control interface. That is not fully supported.\n");
 
         /* workaround for switched interfaces */
         if (data_interface->cur_altsetting->desc.bInterfaceClass != CDC_DATA_INTERFACE_TYPE) {
                 if (control_interface->cur_altsetting->desc.bInterfaceClass == CDC_DATA_INTERFACE_TYPE) {
                         struct usb_interface *t;
-/*          if (debug) dev_dbg(&intf->dev, "Your device has switched interfaces.\n"); */
+/*          if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Your device has switched interfaces.\n"); */
 
                         t = control_interface;
                         control_interface = data_interface;
@@ -1449,13 +1244,13 @@ static int vizzini_probe(struct usb_serial *serial,
 
         /* Accept probe requests only for the control interface */
         if (intf != control_interface) {
-/*      if (debug) dev_dbg(&intf->dev, "Skipping data interface %p\n", intf); */
+/*      if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Skipping data interface %p\n", intf); */
                 return -ENODEV;
         }
-/*  if (debug) dev_dbg(&intf->dev, "Grabbing control interface %p\n", intf); */
+/*  if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Grabbing control interface %p\n", intf); */
 
         if (usb_interface_claimed(data_interface)) { /* valid in this context */
-                if (debug) dev_dbg(&intf->dev, "The data interface isn't available\n");
+                if (DEBUG_CONFIG) dev_dbg(&intf->dev, "The data interface isn't available\n");
                 return -EBUSY;
         }
 
@@ -1476,14 +1271,14 @@ static int vizzini_probe(struct usb_serial *serial,
          * with the attach() entry point, but we can't allow the data
          * interface to remain unclaimed until then; so we need
          * somewhere to save the claimed interface now. */
-        if (!(serial_priv = kzalloc(sizeof(struct vizzini_serial_private), GFP_KERNEL))) {
-                if (debug) dev_dbg(&intf->dev, "out of memory\n");
+        if (!(serial_priv = kzalloc(sizeof(struct xr21b1411_serial_private), GFP_KERNEL))) {
+                if (DEBUG_CONFIG) dev_dbg(&intf->dev, "out of memory\n");
                 goto alloc_fail;
         }
         usb_set_serial_data(serial, serial_priv);
 
-/*  if (debug) dev_dbg(&intf->dev, "Claiming data interface %p\n", data_interface); */
-        usb_driver_claim_interface(&vizzini_driver, data_interface, NULL);
+/*  if (DEBUG_CONFIG) dev_dbg(&intf->dev, "Claiming data interface %p\n", data_interface); */
+        usb_driver_claim_interface(&xr21b1411_driver, data_interface, NULL);
 
         /* Don't set the data interface private data.  When we
          * disconnect we test this field against NULL to discover
@@ -1498,12 +1293,12 @@ alloc_fail:
 }
 
 
-static void vizzini_disconnect(struct usb_interface *interface)
+static void xr21b1411_disconnect(struct usb_interface *interface)
 {
         struct usb_serial               *serial = usb_get_intfdata(interface);
-        struct vizzini_serial_private   *serial_priv;
+        struct xr21b1411_serial_private   *serial_priv;
 
-        if (debug) dev_dbg(&interface->dev, "%s %p\n", __func__, interface);
+        if (DEBUG_CONFIG) dev_dbg(&interface->dev, "%s %p\n", __func__, interface);
 
         if (!serial) {
                 /* NULL interface private data means that we're
@@ -1516,54 +1311,54 @@ static void vizzini_disconnect(struct usb_interface *interface)
 
         serial_priv = usb_get_serial_data(serial);
 
-/*  if (debug) dev_dbg(&interface->dev, "Releasing data interface %p.\n", serial_priv->data_interface); */
-        usb_driver_release_interface(&vizzini_driver, serial_priv->data_interface);
+/*  if (DEBUG_CONFIG) dev_dbg(&interface->dev, "Releasing data interface %p.\n", serial_priv->data_interface); */
+        usb_driver_release_interface(&xr21b1411_driver, serial_priv->data_interface);
 
         kfree(serial_priv);
         usb_set_serial_data(serial, NULL);
 
-/*  if (debug) dev_dbg(&interface->dev, "Disconnecting control interface\n"); */
+/*  if (DEBUG_CONFIG) dev_dbg(&interface->dev, "Disconnecting control interface\n"); */
         usb_serial_disconnect(interface);
 }
 
 
 
-static struct usb_serial_driver vizzini_device = {
+static struct usb_serial_driver xr21b1411_device = {
         .driver = {
-                .owner =    THIS_MODULE,
-                .name =     "vizzini",
+                .owner = THIS_MODULE,
+                .name  = "xr21b1411",
         },
-	.usb_driver	    = &vizzini_driver,
-        .description        = "Vizzini USB serial port",
-        .id_table           = id_table,
-        .calc_num_ports     = vizzini_calc_num_ports,
-        .probe              = vizzini_probe,
-        .open               = vizzini_open,
-        .close              = vizzini_close,
-        .write              = vizzini_write,
-        .write_room         = vizzini_write_room,
-        .ioctl              = vizzini_ioctl,
-        .set_termios        = vizzini_set_termios,
-        .break_ctl          = vizzini_break_ctl,
-        .tiocmget           = vizzini_tiocmget,
-        .tiocmset           = vizzini_tiocmset,
-        .attach             = vizzini_attach,
-        .disconnect        = vizzini_serial_disconnect,
-        .release           = vizzini_serial_release,
-        .read_int_callback  = vizzini_int_callback,
+        .usb_driver        = &xr21b1411_driver,
+        .description       = "xr21b1411 USB serial port",
+        .id_table          = id_table,
+        .calc_num_ports    = xr21b1411_calc_num_ports,
+        .probe             = xr21b1411_probe,
+        .open              = xr21b1411_open,
+        .close             = xr21b1411_close,
+        .write             = xr21b1411_write,
+        .write_room        = xr21b1411_write_room,
+        .ioctl             = xr21b1411_ioctl,
+        .set_termios       = xr21b1411_set_termios,
+        .break_ctl         = xr21b1411_break_ctl,
+        .tiocmget          = xr21b1411_tiocmget,
+        .tiocmset          = xr21b1411_tiocmset,
+        .attach            = xr21b1411_attach,
+        .disconnect        = xr21b1411_serial_disconnect,
+        .release           = xr21b1411_serial_release,
+        .read_int_callback = xr21b1411_int_callback,
 };
 
 
 /* Functions used by new usb-serial code. */
-static int __init vizzini_init(void)
+static int __init xr21b1411_init(void)
 {
         int retval;
-        retval = usb_serial_register(&vizzini_device);
+        retval = usb_serial_register(&xr21b1411_device);
         if (retval)
                 goto failed_device_register;
 
 
-        retval = usb_register(&vizzini_driver);
+        retval = usb_register(&xr21b1411_driver);
         if (retval)
                 goto failed_driver_register;
 
@@ -1572,20 +1367,20 @@ static int __init vizzini_init(void)
         return 0;
 
 failed_driver_register:
-        usb_serial_deregister(&vizzini_device);
+        usb_serial_deregister(&xr21b1411_device);
 failed_device_register:
         return retval;
 }
 
 
-static void __exit vizzini_exit(void)
+static void __exit xr21b1411_exit(void)
 {
-        usb_deregister(&vizzini_driver);
-        usb_serial_deregister(&vizzini_device);
+        usb_deregister(&xr21b1411_driver);
+        usb_serial_deregister(&xr21b1411_device);
 }
 
-module_init(vizzini_init);
-module_exit(vizzini_exit);
+module_init(xr21b1411_init);
+module_exit(xr21b1411_exit);
 
 
 MODULE_AUTHOR(DRIVER_AUTHOR);
@@ -1593,5 +1388,6 @@ MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_VERSION(DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
-module_param(debug, bool, S_IRUGO | S_IWUSR);
+module_param(debug, int, S_IRUGO | S_IWUSR);
 MODULE_PARM_DESC(debug, "Debug messages");
+

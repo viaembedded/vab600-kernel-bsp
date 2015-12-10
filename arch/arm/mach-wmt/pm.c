@@ -249,12 +249,37 @@ void wmt_power_up_debounce_value(void) {
 
 }
 
-/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2013.4.2 */
+/* Add to support VAB-600-A USB HUB hardware reset (GPIO25), by VIA embedded, 2014.10.06 */
 #ifdef CONFIG_VAB600A_USB_HUB_GPIO25_RESET
-void VAB600A_usbhub_gpio25_reset(void)
+void VAB600A_usbhub_gpio25_disable(void)
+{
+	// GPIO Output Data Register
+	GPIO_OD_GPIO_27_20_2BYTE_VAL &= ~BIT9;
+	// GPIO Pull-up/Pull-down Enable Register
+	GPIO_PULL_EN_GPIO_27_24_BYTE_VAL &= ~BIT1;
+
+	// GPIO Enable Register
+	GPIO_CTRL_GPIO_27_24_BYTE_VAL |= BIT1;
+	// GPIO Output Enable Register
+	GPIO_OC_GPIO_27_20_2BYTE_VAL |= BIT9;
+}
+
+void VAB600A_usbhub_gpio25_enable(void)
 {
 	// GPIO Output Data Register
 	GPIO_OD_GPIO_27_20_2BYTE_VAL |= BIT9;
+	// GPIO Pull-up/Pull-down Enable Register
+	GPIO_PULL_EN_GPIO_27_24_BYTE_VAL &= ~BIT1;
+
+	// GPIO Enable Register
+	GPIO_CTRL_GPIO_27_24_BYTE_VAL |= BIT1;
+	// GPIO Output Enable Register
+	GPIO_OC_GPIO_27_20_2BYTE_VAL |= BIT9;
+}
+
+void VAB600A_usbhub_gpio25_reset(void)
+{
+	GPIO_OD_GPIO_27_20_2BYTE_VAL &= ~BIT9;
 	// GPIO Pull-up/Pull-down Enable Register
 	GPIO_PULL_EN_GPIO_27_24_BYTE_VAL &= ~BIT1;
 
